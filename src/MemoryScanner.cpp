@@ -101,66 +101,61 @@ namespace MemoryScanner {
                 }
             }
 
-            // Сканируем регион памяти
-            __try {
-                // Проверяем, есть ли PE-заголовок по указанному адресу
-                if (PEDumper::IsValidPEHeader(req.address)) {
-                    {
-                        std::lock_guard<std::mutex> lock(g_DumpedMutex);
-                        g_DumpedModules.insert(req.address);
+            // Проверяем, есть ли PE-заголовок по указанному адресу.
+            // IsValidPEHeader защищает чтение памяти через SEH внутри POD-функции.
+            if (PEDumper::IsValidPEHeader(req.address)) {
+                {
+                    std::lock_guard<std::mutex> lock(g_DumpedMutex);
+                    g_DumpedModules.insert(req.address);
+                }
+
+                std::wstring filename = GetDumpFilename(req.address);
+                Logger::Log(L"[Scanner] Found PE module at " + AddrToHex((uintptr_t)req.address) + L"! Dumping...");
+                PEDumper::DumpProcessMemory(req.address, filename);
+            } else {
+                // Если адрес не указывает прямо на PE, но размер большой, попробуем найти MZ внутри региона
+                // (например, если хук сработал на VirtualAlloc, который выделил память, а MZ записали чуть позже)
+                // Для этого мы можем подождать короткое время или сканировать регион с шагом страницы (4KB)
+                BYTE* start = (BYTE*)req.address;
+                SIZE_T scanSize = req.size;
+
+                // Ограничим размер сканирования для безопасности
+                if (scanSize > 100 * 1024 * 1024) { // 100 MB limit
+                    scanSize = 100 * 1024 * 1024;
+                }
+
+                for (SIZE_T offset = 0; offset < scanSize; offset += 0x1000) {
+                    PVOID currentAddr = start + offset;
+
+                    // Перепроверяем доступность страницы через VirtualQuery перед чтением,
+                    // так как регион мог быть освобождён между постановкой в очередь и сканированием.
+                    MEMORY_BASIC_INFORMATION mbi;
+                    if (VirtualQuery(currentAddr, &mbi, sizeof(mbi)) != sizeof(mbi)) {
+                        continue;
+                    }
+                    if (mbi.State != MEM_COMMIT || !IsReadableProtection(mbi.Protect)) {
+                        continue;
                     }
 
-                    std::wstring filename = GetDumpFilename(req.address);
-                    Logger::Log(L"[Scanner] Found PE module at " + AddrToHex((uintptr_t)req.address) + L"! Dumping...");
-                    PEDumper::DumpProcessMemory(req.address, filename);
-                } else {
-                    // Если адрес не указывает прямо на PE, но размер большой, попробуем найти MZ внутри региона
-                    // (например, если хук сработал на VirtualAlloc, который выделил память, а MZ записали чуть позже)
-                    // Для этого мы можем подождать короткое время или сканировать регион с шагом страницы (4KB)
-                    BYTE* start = (BYTE*)req.address;
-                    SIZE_T scanSize = req.size;
-
-                    // Ограничим размер сканирования для безопасности
-                    if (scanSize > 100 * 1024 * 1024) { // 100 MB limit
-                        scanSize = 100 * 1024 * 1024;
-                    }
-
-                    for (SIZE_T offset = 0; offset < scanSize; offset += 0x1000) {
-                        PVOID currentAddr = start + offset;
-
-                        // Перепроверяем доступность страницы через VirtualQuery перед чтением,
-                        // так как регион мог быть освобождён между постановкой в очередь и сканированием.
-                        MEMORY_BASIC_INFORMATION mbi;
-                        if (VirtualQuery(currentAddr, &mbi, sizeof(mbi)) != sizeof(mbi)) {
-                            continue;
-                        }
-                        if (mbi.State != MEM_COMMIT || !IsReadableProtection(mbi.Protect)) {
-                            continue;
+                    if (PEDumper::IsValidPEHeader(currentAddr)) {
+                        bool alreadyDumped = false;
+                        {
+                            std::lock_guard<std::mutex> lock(g_DumpedMutex);
+                            if (g_DumpedModules.count(currentAddr) > 0) {
+                                alreadyDumped = true;
+                            } else {
+                                g_DumpedModules.insert(currentAddr);
+                            }
                         }
 
-                        if (PEDumper::IsValidPEHeader(currentAddr)) {
-                            bool alreadyDumped = false;
-                            {
-                                std::lock_guard<std::mutex> lock(g_DumpedMutex);
-                                if (g_DumpedModules.count(currentAddr) > 0) {
-                                    alreadyDumped = true;
-                                } else {
-                                    g_DumpedModules.insert(currentAddr);
-                                }
-                            }
-
-                            if (!alreadyDumped) {
-                                std::wstring filename = GetDumpFilename(currentAddr);
-                                Logger::Log(L"[Scanner] Found PE module inside region at " + AddrToHex((uintptr_t)currentAddr) + L"! Dumping...");
-                                PEDumper::DumpProcessMemory(currentAddr, filename);
-                                break;
-                            }
+                        if (!alreadyDumped) {
+                            std::wstring filename = GetDumpFilename(currentAddr);
+                            Logger::Log(L"[Scanner] Found PE module inside region at " + AddrToHex((uintptr_t)currentAddr) + L"! Dumping...");
+                            PEDumper::DumpProcessMemory(currentAddr, filename);
+                            break;
                         }
                     }
                 }
-            }
-            __except (EXCEPTION_EXECUTE_HANDLER) {
-                Logger::Log(L"[Scanner] Exception during memory scanning at " + AddrToHex((uintptr_t)req.address));
             }
         }
         Logger::Log(L"[Scanner] Worker thread stopped.");
