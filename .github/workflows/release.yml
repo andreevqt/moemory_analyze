@@ -1,0 +1,81 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Windows x86 release
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -A Win32 -DBUILD_TESTING=ON
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $packageName = "memory-analyzer-${{ github.ref_name }}-windows-x86"
+          $packageDir = "dist/$packageName"
+          $archive = "dist/$packageName.zip"
+
+          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+          Copy-Item build/Release/MemoryAnalyzer.dll $packageDir
+          Copy-Item build/Release/Injector.exe $packageDir
+          Copy-Item build/Release/TestApp.exe $packageDir
+          Copy-Item README.md $packageDir
+          Compress-Archive -Path $packageDir -DestinationPath $archive
+
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $packageName.zip" | Set-Content "$archive.sha256" -NoNewline
+
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $packageName = "memory-analyzer-$tag-windows-x86"
+          $isDraft = gh release view $tag --json isDraft --jq ".isDraft" 2>$null
+
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --draft --verify-tag --generate-notes --title "Memory Analyzer $tag"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $isDraft = "true"
+          }
+
+          if ($isDraft -ne "true") {
+            Write-Host "Release $tag is already published."
+            exit 0
+          }
+
+          gh release upload $tag "dist/$packageName.zip" "dist/$packageName.zip.sha256" --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit $tag --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Print diagnostic logs
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-ChildItem build -Recurse -Filter *.log | ForEach-Object {
+            Write-Host "::group::$($_.FullName)"
+            Get-Content $_.FullName
+            Write-Host "::endgroup::"
+          }

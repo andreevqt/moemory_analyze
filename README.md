@@ -45,6 +45,19 @@ ctest -C Release --output-on-failure
 TestApp.exe --no-wait
 ```
 
+### Релизы
+
+GitHub Actions автоматически собирает и публикует Windows x86 архив при отправке
+тега, начинающегося с `v`:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+В GitHub Release появятся ZIP-архив с `MemoryAnalyzer.dll`, `Injector.exe`,
+`TestApp.exe` и файл с контрольной суммой SHA-256.
+
 ### Запуск инжектора
 
 ```bash
