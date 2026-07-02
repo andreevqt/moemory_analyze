@@ -1,0 +1,4 @@
+LIBRARY WardenDetector
+EXPORTS
+    WardenDetectorShutdown=_WardenDetectorShutdown@0
+    WardenDetectorWaitForReady=_WardenDetectorWaitForReady@4
