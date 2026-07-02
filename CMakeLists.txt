@@ -38,6 +38,7 @@ endif()
 
 # 1. Создание цели для DLL (MemoryAnalyzer)
 add_library(MemoryAnalyzer SHARED
+    src/MemoryAnalyzer.def
     src/dllmain.cpp
     src/Logger.h
     src/PEDumper.h

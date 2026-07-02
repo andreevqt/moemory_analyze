@@ -54,6 +54,9 @@ Injector.exe --name <process_name.exe> <absolute_path_to_MemoryAnalyzer.dll>
 
 Инжектор создаёт именованный канал `\\.\pipe\MemoryAnalyzerPipe` и печатает логи, которые отправляет DLL.
 
+Перед ручным вызовом `FreeLibrary` необходимо вызвать экспортированную функцию
+`MemoryAnalyzerShutdown`, чтобы снять хуки и остановить фоновые потоки вне loader lock.
+
 ## Принцип работы
 
 1. **Инъекция:** При загрузке DLL в целевой процесс запускается фоновый поток `MainThread`.

@@ -16,7 +16,9 @@ namespace MemoryScanner {
     std::queue<ScanRequest> g_ScanQueue;
     std::mutex g_QueueMutex;
     std::condition_variable g_QueueCV;
-    std::thread g_WorkerThread;
+    // Сырой указатель намеренный: при завершении процесса Windows остановит поток,
+    // не вызывая опасный деструктор joinable std::thread из DLL detach.
+    std::thread* g_WorkerThread = nullptr;
     bool g_ShouldStop = false;
 
     // Множество уже сдампленных базовых адресов, чтобы избежать дубликатов
@@ -174,7 +176,7 @@ namespace MemoryScanner {
             std::lock_guard<std::mutex> lock(g_DumpedMutex);
             g_DumpedModules.clear();
         }
-        g_WorkerThread = std::thread(WorkerProc);
+        g_WorkerThread = new std::thread(WorkerProc);
     }
 
     void Shutdown() {
@@ -183,8 +185,12 @@ namespace MemoryScanner {
             g_ShouldStop = true;
         }
         g_QueueCV.notify_all();
-        if (g_WorkerThread.joinable()) {
-            g_WorkerThread.join();
+        if (g_WorkerThread != nullptr) {
+            if (g_WorkerThread->joinable()) {
+                g_WorkerThread->join();
+            }
+            delete g_WorkerThread;
+            g_WorkerThread = nullptr;
         }
     }
 

@@ -25,3 +25,13 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Print diagnostic logs
+        if: failure()
+        shell: pwsh
+        run: |
+          Get-ChildItem build -Recurse -Filter *.log | ForEach-Object {
+            Write-Host "::group::$($_.FullName)"
+            Get-Content $_.FullName
+            Write-Host "::endgroup::"
+          }

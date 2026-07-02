@@ -4,6 +4,8 @@
 #include "ManualMapSim.h"
 #include "../src/Logger.h"
 
+using MemoryAnalyzerShutdownFn = BOOL(WINAPI*)();
+
 // Прототип функции инициализации хуков и сканера из нашей DLL
 // Мы можем загрузить нашу DLL динамически через LoadLibrary, чтобы протестировать ее работу.
 int main(int argc, char* argv[]) {
@@ -51,9 +53,20 @@ int main(int argc, char* argv[]) {
         std::wcout << L"[+] Released simulated manual mapping memory.\n";
     }
 
-    // Выгружаем DLL
+    // Останавливаем фоновые потоки и снимаем хуки до входа в loader lock.
+    auto shutdownAnalyzer = reinterpret_cast<MemoryAnalyzerShutdownFn>(
+        GetProcAddress(hAnalyzer, "MemoryAnalyzerShutdown"));
+    if (!shutdownAnalyzer || !shutdownAnalyzer()) {
+        std::wcout << L"[-] Error: Failed to shut down Memory Analyzer DLL.\n";
+        return 1;
+    }
+
+    // Выгружаем DLL только после явной очистки ресурсов.
     std::wcout << L"[+] Unloading Memory Analyzer DLL...\n";
-    FreeLibrary(hAnalyzer);
+    if (!FreeLibrary(hAnalyzer)) {
+        std::wcout << L"[-] Error: Failed to unload MemoryAnalyzer.dll.\n";
+        return 1;
+    }
 
     std::wcout << L"[+] Test finished. Check 'memory_analyzer.log' and 'test_app.log' for details.\n";
     if (!nonInteractive) {

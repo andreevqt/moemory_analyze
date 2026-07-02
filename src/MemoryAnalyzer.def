@@ -1,0 +1,3 @@
+LIBRARY MemoryAnalyzer
+EXPORTS
+    MemoryAnalyzerShutdown=_MemoryAnalyzerShutdown@0
