@@ -58,7 +58,10 @@ extern "C" BOOL WINAPI WardenDetectorShutdown() {
     }
 
     Logger::Log(L"[Main] Shutting down Warden Detector...");
-    HookManager::RemoveHooks();
+    if (!HookManager::RemoveHooks()) {
+        Logger::Log(L"[Main] Shutdown aborted because hooks could not be removed safely.");
+        return FALSE;
+    }
     WardenScanner::Shutdown();
 
     if (g_MainThread != NULL) {

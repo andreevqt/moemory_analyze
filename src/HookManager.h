@@ -4,5 +4,5 @@
 
 namespace HookManager {
     bool InitializeHooks();
-    void RemoveHooks();
+    bool RemoveHooks();
 }

@@ -1,4 +1,5 @@
 #include "WardenScanner.h"
+#include "BoundedUniqueQueue.h"
 #include "Logger.h"
 #include "WardenDetector.h"
 #include <atomic>
@@ -8,16 +9,19 @@
 #include <ctime>
 #include <iomanip>
 #include <mutex>
-#include <queue>
 #include <sstream>
+#include <string>
 
 namespace WardenScanner {
-    std::queue<PVOID> g_ScanQueue;
+    constexpr std::size_t kMaxPendingScans = 1024;
+
+    BoundedUniqueQueue<PVOID, kMaxPendingScans> g_ScanQueue;
     std::mutex g_ScanMutex;
     std::condition_variable g_ScanCV;
     bool g_Initialized = false;
     bool g_ShouldStop = false;
     std::atomic<bool> g_WardenDumped = false;
+    std::atomic<std::size_t> g_DroppedScanEvents = 0;
 
     std::wstring FormatTimestamp(std::time_t timestamp) {
         std::tm localTime = {};
@@ -108,10 +112,10 @@ namespace WardenScanner {
             return true;
         }
 
-        std::queue<PVOID> empty;
-        std::swap(g_ScanQueue, empty);
+        g_ScanQueue.Clear();
         g_ShouldStop = false;
         g_WardenDumped.store(false, std::memory_order_release);
+        g_DroppedScanEvents.store(0, std::memory_order_release);
         g_Initialized = true;
         Logger::Log(L"[Scanner] Initialized one worker for detection and dumping.");
         return true;
@@ -123,13 +127,18 @@ namespace WardenScanner {
             PVOID address = nullptr;
             {
                 std::unique_lock<std::mutex> lock(g_ScanMutex);
-                g_ScanCV.wait(lock, [] { return !g_ScanQueue.empty() || g_ShouldStop; });
-                if (g_ShouldStop && g_ScanQueue.empty()) {
+                g_ScanCV.wait(lock, [] { return !g_ScanQueue.Empty() || g_ShouldStop; });
+                if (g_ShouldStop && g_ScanQueue.Empty()) {
                     break;
                 }
 
-                address = g_ScanQueue.front();
-                g_ScanQueue.pop();
+                g_ScanQueue.TryPop(address);
+            }
+
+            std::size_t dropped = g_DroppedScanEvents.exchange(0, std::memory_order_acq_rel);
+            if (dropped != 0) {
+                Logger::Log(L"[Scanner] Dropped " + std::to_wstring(dropped) +
+                            L" scan events because the bounded queue was full.");
             }
             ScanAddress(address);
         }
@@ -149,15 +158,21 @@ namespace WardenScanner {
             return;
         }
 
+        QueuePushResult pushResult;
         {
             std::lock_guard<std::mutex> lock(g_ScanMutex);
             if (!g_Initialized || g_ShouldStop ||
                 g_WardenDumped.load(std::memory_order_relaxed)) {
                 return;
             }
-            g_ScanQueue.push(address);
+            pushResult = g_ScanQueue.TryPush(address);
+            if (pushResult == QueuePushResult::Full) {
+                g_DroppedScanEvents.fetch_add(1, std::memory_order_relaxed);
+            }
         }
-        g_ScanCV.notify_one();
+        if (pushResult == QueuePushResult::Inserted) {
+            g_ScanCV.notify_one();
+        }
     }
 
     void PerformFullScan() {

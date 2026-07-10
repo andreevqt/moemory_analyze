@@ -1,12 +1,12 @@
 #include "HookManager.h"
+#include "HookCallTracker.h"
 #include "WardenScanner.h"
 #include "Logger.h"
 #include <MinHook.h>
+#include <atomic>
 #include <array>
 #include <cstring>
-#include <cstdint>
 #include <mutex>
-#include <sstream>
 
 namespace HookManager {
 
@@ -21,6 +21,8 @@ namespace HookManager {
     size_t g_HookCount = 0;
     std::mutex g_HookMutex;
     bool g_Initialized = false;
+    std::atomic<bool> g_AcceptScanEvents = false;
+    HookCallTracker g_ActiveHookCalls;
     thread_local bool g_InsideHook = false;
 
     using fnVirtualProtect = BOOL(WINAPI*)(LPVOID, SIZE_T, DWORD, PDWORD);
@@ -78,18 +80,29 @@ namespace HookManager {
         g_OriginalVirtualProtectEx = nullptr;
     }
 
-    void RemoveCreatedHooks() {
+    bool RemoveCreatedHooks() {
+        bool success = true;
         for (size_t i = 0; i < g_HookCount; ++i) {
-            MH_RemoveHook(g_Hooks[i].target);
+            if (g_Hooks[i].target == nullptr) {
+                continue;
+            }
+
+            MH_STATUS status = MH_RemoveHook(g_Hooks[i].target);
+            if (status == MH_OK || status == MH_ERROR_NOT_CREATED) {
+                Logger::Log(L"[Hook] Removed hook from " + ToWide(g_Hooks[i].name));
+                g_Hooks[i].target = nullptr;
+            } else {
+                LogMinHookError(L"MH_RemoveHook", g_Hooks[i].name, status);
+                success = false;
+            }
         }
+        if (!success) {
+            return false;
+        }
+
         g_HookCount = 0;
         ResetOriginalFunctions();
-    }
-
-    std::wstring ToHex(uintptr_t value) {
-        std::wstringstream ss;
-        ss << L"0x" << std::hex << value;
-        return ss.str();
+        return true;
     }
 
     bool ShouldScanProtection(DWORD protect) {
@@ -105,6 +118,7 @@ namespace HookManager {
     }
 
     BOOL WINAPI HookedVirtualProtect(LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWORD lpflOldProtect) {
+        HookCallTracker::Guard activeCall(g_ActiveHookCalls);
         if (g_InsideHook) {
             return g_OriginalVirtualProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
         }
@@ -112,19 +126,15 @@ namespace HookManager {
         HookCallGuard guard;
         BOOL result = g_OriginalVirtualProtect(lpAddress, dwSize, flNewProtect, lpflOldProtect);
 
-        if (result) {
-            Logger::Log(L"[Hook] VirtualProtect called. Base: " + ToHex((uintptr_t)lpAddress) +
-                        L", Size: " + ToHex(dwSize) +
-                        L", NewProtect: " + ToHex(flNewProtect));
-
-            if (ShouldScanProtection(flNewProtect)) {
-                WardenScanner::QueueScan(lpAddress);
-            }
+        if (result && g_AcceptScanEvents.load(std::memory_order_acquire) &&
+            ShouldScanProtection(flNewProtect)) {
+            WardenScanner::QueueScan(lpAddress);
         }
         return result;
     }
 
     BOOL WINAPI HookedVirtualProtectEx(HANDLE hProcess, LPVOID lpAddress, SIZE_T dwSize, DWORD flNewProtect, PDWORD lpflOldProtect) {
+        HookCallTracker::Guard activeCall(g_ActiveHookCalls);
         if (g_InsideHook) {
             return g_OriginalVirtualProtectEx(hProcess, lpAddress, dwSize, flNewProtect, lpflOldProtect);
         }
@@ -132,14 +142,10 @@ namespace HookManager {
         HookCallGuard guard;
         BOOL result = g_OriginalVirtualProtectEx(hProcess, lpAddress, dwSize, flNewProtect, lpflOldProtect);
 
-        if (result && (hProcess == GetCurrentProcess() || GetProcessId(hProcess) == GetCurrentProcessId())) {
-            Logger::Log(L"[Hook] VirtualProtectEx called. Base: " + ToHex((uintptr_t)lpAddress) +
-                        L", Size: " + ToHex(dwSize) +
-                        L", NewProtect: " + ToHex(flNewProtect));
-
-            if (ShouldScanProtection(flNewProtect)) {
-                WardenScanner::QueueScan(lpAddress);
-            }
+        if (result && g_AcceptScanEvents.load(std::memory_order_acquire) &&
+            ShouldScanProtection(flNewProtect) &&
+            (hProcess == GetCurrentProcess() || GetProcessId(hProcess) == GetCurrentProcessId())) {
+            WardenScanner::QueueScan(lpAddress);
         }
         return result;
     }
@@ -181,6 +187,7 @@ namespace HookManager {
         }
 
         if (!success) {
+            g_AcceptScanEvents.store(false, std::memory_order_release);
             MH_DisableHook(MH_ALL_HOOKS);
             RemoveCreatedHooks();
             MH_Uninitialize();
@@ -188,32 +195,36 @@ namespace HookManager {
         }
 
         g_Initialized = true;
+        g_AcceptScanEvents.store(true, std::memory_order_release);
         for (size_t i = 0; i < g_HookCount; ++i) {
             Logger::Log(L"[Hook] Successfully hooked " + ToWide(g_Hooks[i].name));
         }
         return true;
     }
 
-    void RemoveHooks() {
+    bool RemoveHooks() {
         std::lock_guard<std::mutex> lock(g_HookMutex);
         if (!g_Initialized) {
-            return;
+            return true;
         }
 
+        g_AcceptScanEvents.store(false, std::memory_order_release);
         MH_STATUS status = MH_DisableHook(MH_ALL_HOOKS);
-        if (status != MH_OK) {
+        if (status != MH_OK && status != MH_ERROR_DISABLED) {
             Logger::Log(L"[Hook] MH_DisableHook failed: " + StatusMessage(status));
+            return false;
         }
 
-        for (size_t i = 0; i < g_HookCount; ++i) {
-            Logger::Log(L"[Hook] Removed hook from " + ToWide(g_Hooks[i].name));
+        g_ActiveHookCalls.WaitForIdle();
+        if (!RemoveCreatedHooks()) {
+            return false;
         }
-
-        RemoveCreatedHooks();
         status = MH_Uninitialize();
         if (status != MH_OK) {
             Logger::Log(L"[Hook] MH_Uninitialize failed: " + StatusMessage(status));
+            return false;
         }
         g_Initialized = false;
+        return true;
     }
 }

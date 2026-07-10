@@ -41,6 +41,8 @@ add_library(WardenDetector SHARED
     src/WardenDetector.def
     src/dllmain.cpp
     src/Logger.h
+    src/BoundedUniqueQueue.h
+    src/HookCallTracker.h
     src/WardenDetector.h
     src/WardenDetector.cpp
     src/WardenScanner.h
@@ -82,4 +84,10 @@ add_custom_command(TARGET Injector POST_BUILD
 
 if(BUILD_TESTING)
     add_test(NAME TestAppSmoke COMMAND TestApp --no-wait)
+
+    add_executable(CoreTests
+        test/core_tests.cpp
+    )
+    target_include_directories(CoreTests PRIVATE src)
+    add_test(NAME CoreTests COMMAND CoreTests)
 endif()
